@@ -1,13 +1,15 @@
 import { Store, ApiError } from './store.ts';
 
-type Field = { name: string; alias: string; args: any; fields: Field[]; condition?: string };
+type Field = { name: string; alias: string; args: any; fields: Field[]; condition?: string; directives?: { name: string; args: any }[] };
 type Operation = { name?: string; mutation: boolean; fields: Field[]; defaults: any };
 
 class Parser {
   tokens: string[];
   at = 0;
+  depth = 0;
   constructor(query: string) {
-    this.tokens = query.match(/\.\.\.|"(?:\\.|[^"\\])*"|[A-Za-z_][\w]*|-?\d+(?:\.\d+)?|[!$():={}\[\]@|]/g) ?? [];
+    this.tokens = query.match(/#[^\n]*|\.\.\.|"(?:\\.|[^"\\])*"|[A-Za-z_][\w]*|-?\d+(?:\.\d+)?|[!$():={}\[\]@|]/g)?.filter(t => !t.startsWith('#')) ?? [];
+    if (this.tokens.length > 20000) throw new Error('Query is too large');
   }
   peek() { return this.tokens[this.at]; }
   take(expected?: string) { const t = this.tokens[this.at++]; if (!t || expected && t !== expected) throw new Error(`Expected ${expected ?? 'token'}, found ${t ?? 'end of query'}`); return t; }
@@ -31,6 +33,7 @@ class Parser {
     this.take(')'); return result;
   }
   fields(): Field[] {
+    if (++this.depth > 64) throw new Error('Query is too deep');
     this.take('{'); const result: Field[] = [];
     while (this.peek() !== '}') {
       let name = this.take();
@@ -41,12 +44,12 @@ class Parser {
       }
       let alias = name;
       if (this.peek() === ':') { this.take(); name = this.take(); }
-      const args = this.arguments();
-      while (this.peek() === '@') { this.take(); this.take(); this.arguments(); }
+      const args = this.arguments(), directives: { name: string; args: any }[] = [];
+      while (this.peek() === '@') { this.take(); directives.push({ name: this.take(), args: this.arguments() }); }
       const fields = this.peek() === '{' ? this.fields() : [];
-      result.push({ name, alias, args, fields });
+      result.push({ name, alias, args, fields, directives });
     }
-    this.take('}'); return result;
+    this.take('}'); this.depth--; return result;
   }
   document() {
     const operations: Operation[] = [], fragments = new Map<string, Field[]>();
@@ -129,18 +132,27 @@ export function graphql(store: Store, request: any): any {
   if (Array.isArray(request)) return request.map(r => graphql(store, r));
   try {
     if (typeof request.query !== 'string') throw new Error('query must be a string');
-    const { operations, fragments } = new Parser(request.query.replace(/#[^\n]*/g, '')).document();
+    const { operations, fragments } = new Parser(request.query).document();
     const op = request.operationName ? operations.find(o => o.name === request.operationName) : operations.length === 1 ? operations[0] : undefined;
     if (!op) throw new Error('An operation name is required');
     const vars = { ...op.defaults, ...request.variables };
     const errors: any[] = [];
-    function validate(fields: Field[], type: string) {
+    function validate(fields: Field[], type: string, active = new Set<string>()) {
       for (const f of fields) {
-        if (f.name === '...') { validate(f.fields.length ? f.fields : fragments.get(f.alias) ?? [], f.condition ?? type); continue; }
+        if (f.name === '...') {
+          if (f.condition) validate(f.fields, f.condition, active);
+          else {
+            if (!fragments.has(f.alias)) { errors.push({ message: `Unknown fragment "${f.alias}".` }); continue; }
+            if (active.has(f.alias)) { errors.push({ message: `Fragment cycle at "${f.alias}".` }); continue; }
+            const next = new Set(active); next.add(f.alias); validate(fragments.get(f.alias)!, type, next);
+          }
+          continue;
+        }
+        for (const d of f.directives ?? []) if (!['skip', 'include'].includes(d.name)) errors.push({ message: `Unknown directive "${d.name}".` });
         if (f.name === '__typename') continue;
         const child = schemas[type]?.[f.name];
         if (!child && type !== 'Node') errors.push({ message: `Cannot query field "${f.name}" on type "${type}".` });
-        if (child && !scalar.has(child)) validate(f.fields, child);
+        if (child && !scalar.has(child)) validate(f.fields, child, active);
         if (type === 'Node' && f.name !== 'id') errors.push({ message: `Cannot query field "${f.name}" on type "Node".` });
       }
     }
@@ -201,6 +213,7 @@ export function graphql(store: Store, request: any): any {
       if (Array.isArray(parent)) return parent.map(p => project(p, p?._type ?? type, fields));
       const result = {};
       for (const f of fields) {
+        if ((f.directives ?? []).some(d => d.name === 'skip' ? values(d.args, vars).if === true : values(d.args, vars).if === false)) continue;
         if (f.name === '...') { if (!f.condition || f.condition === parent._type || f.condition === type) Object.assign(result, project(parent, f.condition ?? type, f.fields.length ? f.fields : fragments.get(f.alias) ?? [])); continue; }
         const v = resolve(type, parent, f.name, values(f.args, vars));
         const next = v?._type ?? schemas[type]?.[f.name] ?? (f.name === 'id' ? 'ID' : 'String');

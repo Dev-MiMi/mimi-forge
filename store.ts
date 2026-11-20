@@ -139,6 +139,8 @@ export class Store {
     if (remove) files.delete(path);
     else {
       if (typeof input.content !== 'string') throw new ApiError(422, 'content is required');
+      const encoded = input.content.replace(/\s/g, '');
+      if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(encoded)) throw new ApiError(422, 'content must be valid base64');
       files.set(path, { mode: old?.mode ?? '100644', oid: this.putObject(r, 'blob', Buffer.from(input.content, 'base64')) });
     }
     const sha = this.commitFiles(r, files, input.message, branch, undefined, input.committer ?? input.author);
@@ -170,6 +172,9 @@ export class Store {
     return i._json;
   }
   patchIssue(r: any, i: any, input: any) {
+    if (input.title !== undefined) requireValue(input.title, 'title');
+    if (input.body !== undefined && typeof input.body !== 'string') throw new ApiError(422, 'body must be a string');
+    if (input.state !== undefined && !['open', 'closed'].includes(input.state)) throw new ApiError(422, 'Invalid state');
     if (input.labels) for (const l of input.labels) if (!r.labels.has(typeof l === 'string' ? l : l.name)) throw new ApiError(422, 'Unknown label');
     i._json = undefined; i._buffer = undefined;
     for (const key of ['title', 'body']) if (input[key] !== undefined) i[key] = input[key];
@@ -252,8 +257,12 @@ export function rest(store: Store, method: string, path: string, query: any, bod
   const r = store.get(parts[1], parts[2]), route = parts[3], n = Number(parts[4]);
   if (!route) {
     if (method === 'GET') return ok(store.repoJson(r));
-    if (method === 'PATCH') { for (const k of ['description', 'private', 'default_branch', 'has_issues']) if (body[k] !== undefined) r[k] = body[k]; return ok(store.repoJson(r)); }
-    if (method === 'DELETE') { store.repos.delete(r.name.toLowerCase()); return ok(null, 204); }
+    if (method === 'PATCH') { for (const k of ['description', 'private', 'default_branch', 'has_issues']) if (body[k] !== undefined) r[k] = body[k]; r.fetchCache.clear(); return ok(store.repoJson(r)); }
+    if (method === 'DELETE') {
+      store.repos.delete(r.name.toLowerCase()); store.nodes.delete(r.node_id);
+      for (const node of [...r.issues.values(), ...r.pulls.values(), ...r.comments.values()]) store.nodes.delete(node.node_id);
+      return ok(null, 204);
+    }
   }
   if (route === 'contents') {
     const file = parts.slice(4).join('/');

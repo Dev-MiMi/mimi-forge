@@ -36,9 +36,11 @@ node /path/to/github-core-clone-01-kit/sdk/run.ts \
   --url http://127.0.0.1:PORT --token your-token --perf --json
 ```
 
-The full local conformance suite passes all 120 checks. Two fresh lifecycle trials also pass 120/120 and produce byte-identical state exports. Seven regression tests cover binary and delta packs, stale writes, conflicting and squash merges, mixed push reports, API parity and deterministic output.
+The full local conformance suite passes all 120 checks. Two fresh lifecycle trials also pass 120/120 and produce byte-identical state exports. Fourteen regression tests cover binary and delta packs, stale writes, conflicting and squash merges, mixed push reports, complete object graphs, GraphQL validation, HTTP framing, API parity and deterministic output.
 
-The first make.fun practice submission scored **902/1000**: feature 600, MCP 200, performance 102. Practice scores are provisional. Local Termux performance differs substantially from the production sandbox.
+The first make.fun practice submission scored **902/1000**: feature 600, MCP 200, performance 102. The second scored **921/1000** with full feature and MCP marks. Practice scores are provisional. Local Termux performance differs substantially from the production sandbox.
+
+The default transport parses HTTP/1.1 directly using Node's TCP server and caches complete responses for repeated reads. It supports keep-alive, pipelining, chunked bodies and `Expect: 100-continue`, and rejects ambiguous request lengths. Set `FORGE_HTTP_DRIVER=node` to use Node's standard HTTP transport with the same application handler.
 
 The store is ephemeral and resets when the process exits. This implements the bounty's documented GitHub API subset; it does not implement all of GitHub's APIs, persistent hosting, multiple users, or a complete GraphQL specification.
 

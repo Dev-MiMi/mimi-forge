@@ -109,3 +109,38 @@ test('identical sequences generate identical content and global ids', () => {
   };
   assert.equal(run(), run());
 });
+
+test('incomplete commit graphs are refused without moving an existing branch', () => {
+  const { store, repo } = fixture();
+  const root = store.ref(repo);
+  const commit = object('commit', `tree ${ZERO}\nparent ${root}\nauthor mimi <mimi@example.invalid> 0 +0000\ncommitter mimi <mimi@example.invalid> 0 +0000\n\nMissing tree\n`);
+  const body = Buffer.concat([pkt(`${root} ${commit.oid} refs/heads/main\0report-status\n`), FLUSH, writePack([commit])]);
+  const result = gitRequest(repo, 'POST', 'git-receive-pack', false, body).toString();
+  assert.match(result, /ng refs\/heads\/main incomplete object graph/);
+  assert.equal(store.ref(repo), root);
+});
+
+test('deleting a repository removes GraphQL nodes, and invalid base64 cannot mutate files', () => {
+  const { store, repo } = fixture();
+  const issue = store.createIssue(repo, { title: 'delete me' });
+  const before = store.ref(repo);
+  assert.throws(() => store.writeContent(repo, 'invalid', { message: 'bad', content: '%%%!' }), /valid base64/);
+  assert.equal(store.ref(repo), before);
+  rest(store, 'DELETE', '/repos/mimi/example', {}, {});
+  assert.equal(store.nodes.has(repo.node_id), false);
+  assert.equal(store.nodes.has(issue.node_id), false);
+  const result = graphql(store, { query: '{ node(id:"' + issue.node_id + '") { id } }' });
+  assert.equal(result.data.node, null);
+});
+
+test('GraphQL preserves hashes in strings, handles directives, and rejects cyclic fragments', () => {
+  const { store, repo } = fixture();
+  const mutation = `mutation { createIssue(input:{repositoryId:"${repo.node_id}",title:"Fix #123",body:"# heading"}) { issue { title body } } }`;
+  assert.deepEqual(graphql(store, { query: mutation }).data.createIssue.issue, { title: 'Fix #123', body: '# heading' });
+  const query = 'query($skip:Boolean!) { viewer { login name @skip(if:$skip) } }';
+  assert.deepEqual(graphql(store, { query, variables: { skip: true } }).data.viewer, { login: 'mimi' });
+  const cyclic = graphql(store, { query: '{ viewer { ...A } } fragment A on User { ...A }' });
+  assert.match(cyclic.errors[0].message, /cycle/);
+  const missing = graphql(store, { query: '{ viewer { ...Missing } }' });
+  assert.match(missing.errors[0].message, /Unknown fragment/);
+});

@@ -2,11 +2,11 @@ import { createHash } from 'node:crypto';
 import { inflateSync, deflateSync } from 'node:zlib';
 
 export const ZERO = '0'.repeat(40);
-export type GitObject = { type: string; data: Buffer; oid: string; packed?: Buffer };
+export type GitObject = { type: string; data: Buffer; oid: string; packed?: Buffer; commit?: any; entries?: any[]; children?: string[]; complete?: boolean };
 export const hash = (data: Buffer) => createHash('sha1').update(data).digest('hex');
 export function object(type: string, data: Buffer | string): GitObject {
   const bytes = Buffer.isBuffer(data) ? data : Buffer.from(data);
-  return { type, data: bytes, oid: hash(Buffer.concat([Buffer.from(`${type} ${bytes.length}\0`), bytes])) };
+  return { type, data: bytes, oid: createHash('sha1').update(`${type} ${bytes.length}\0`).update(bytes).digest('hex') };
 }
 export function pkt(data: string | Buffer): Buffer {
   const b = Buffer.isBuffer(data) ? data : Buffer.from(data);
@@ -24,12 +24,13 @@ export function packets(body: Buffer): { lines: string[]; offset: number } {
     if (!/^[0-9a-f]{4}$/i.test(hex)) throw new Error('Invalid packet length');
     const n = parseInt(hex, 16);
     offset += 4;
-    if (n === 0) break;
+    if (n === 0) return { lines, offset };
     if (n === 1 || n === 2) continue;
     if (n < 4 || offset + n - 4 > body.length) throw new Error('Truncated packet');
     lines.push(body.subarray(offset, offset + n - 4).toString().replace(/\n$/, ''));
     offset += n - 4;
   }
+  if (offset !== body.length) throw new Error('Truncated packet header');
   return { lines, offset };
 }
 export function allPackets(body: Buffer): string[] {
@@ -93,18 +94,24 @@ export function readPack(pack: Buffer, existing: Map<string, GitObject>): GitObj
   const pending: any[] = [];
   const result: GitObject[] = [];
   let at = 12;
+  let totalBytes = 0;
   for (let i = 0; i < count; i++) {
     const start = at;
-    let b = pack[at++], type = (b >> 4) & 7, size = b & 15, shift = 4;
-    while (b & 128) { b = pack[at++]; size += (b & 127) * 2 ** shift; shift += 7; if (shift > 49) throw new Error('Invalid object size'); }
+    const byte = () => { if (at >= pack.length - 20) throw new Error('Truncated pack object'); return pack[at++]; };
+    let b = byte(), type = (b >> 4) & 7, size = b & 15, shift = 4;
+    while (b & 128) { b = byte(); size += (b & 127) * 2 ** shift; shift += 7; if (shift > 49) throw new Error('Invalid object size'); }
+    if (size > 64 * 1024 * 1024) throw new Error('Pack object too large');
     let baseOffset: number | undefined, baseOid: string | undefined;
     if (type === 6) {
-      b = pack[at++]; let distance = b & 127;
-      while (b & 128) { b = pack[at++]; distance = (distance + 1) * 128 + (b & 127); }
+      b = byte(); let distance = b & 127;
+      while (b & 128) { b = byte(); distance = (distance + 1) * 128 + (b & 127); if (!Number.isSafeInteger(distance)) throw new Error('Invalid delta offset'); }
       baseOffset = start - distance;
-    } else if (type === 7) { baseOid = pack.subarray(at, at + 20).toString('hex'); at += 20; }
+      if (distance <= 0 || baseOffset < 12) throw new Error('Invalid delta offset');
+    } else if (type === 7) { if (at + 20 > pack.length - 20) throw new Error('Truncated delta reference'); baseOid = pack.subarray(at, at + 20).toString('hex'); at += 20; }
     const inflated: any = inflateSync(pack.subarray(at, pack.length - 20), { info: true, maxOutputLength: 64 * 1024 * 1024 });
     const data: Buffer = inflated.buffer;
+    totalBytes += data.length;
+    if (totalBytes > 256 * 1024 * 1024) throw new Error('Expanded pack too large');
     at += inflated.engine.bytesWritten;
     if (data.length !== size) throw new Error('Pack object size mismatch');
     if (type === 6 || type === 7) { pending.push({ start, data, baseOffset, baseOid }); continue; }
@@ -121,6 +128,8 @@ export function readPack(pack: Buffer, existing: Map<string, GitObject>): GitObj
       const base = p.baseOid ? byOid.get(p.baseOid) ?? existing.get(p.baseOid) : byOffset.get(p.baseOffset);
       if (!base) continue;
       const obj = object(base.type, applyDelta(base.data, p.data));
+      totalBytes += obj.data.length;
+      if (totalBytes > 256 * 1024 * 1024) throw new Error('Expanded pack too large');
       byOffset.set(p.start, obj); byOid.set(obj.oid, obj); result.push(obj);
       pending.splice(i, 1); progress = true;
     }
@@ -148,8 +157,9 @@ export function writePack(objects: GitObject[]): Buffer {
 
 export function commitInfo(obj: GitObject | undefined): any {
   if (!obj || obj.type !== 'commit') return { parents: [], tree: '', message: '' };
+  if (obj.commit) return obj.commit;
   const text = obj.data.toString(), split = text.indexOf('\n\n'), headers = text.slice(0, split).split('\n');
-  return {
+  return obj.commit = {
     tree: headers.find(s => s.startsWith('tree '))?.slice(5) ?? '',
     parents: headers.filter(s => s.startsWith('parent ')).map(s => s.slice(7)),
     message: text.slice(split + 2),
@@ -159,6 +169,7 @@ export function commitInfo(obj: GitObject | undefined): any {
 }
 export function treeEntries(obj: GitObject | undefined): any[] {
   if (!obj || obj.type !== 'tree') return [];
+  if (obj.entries) return obj.entries;
   const b = obj.data, entries = []; let at = 0;
   while (at < b.length) {
     const space = b.indexOf(32, at), zero = b.indexOf(0, space);
@@ -166,14 +177,33 @@ export function treeEntries(obj: GitObject | undefined): any[] {
     entries.push({ mode: b.toString('ascii', at, space), name: b.toString('utf8', space + 1, zero), oid: b.subarray(zero + 1, zero + 21).toString('hex') });
     at = zero + 21;
   }
-  return entries;
+  return obj.entries = entries;
 }
 export function links(obj: GitObject | undefined): string[] {
   if (!obj) return [];
+  if (obj.children) return obj.children;
   if (obj.type === 'commit') { const c = commitInfo(obj); return [c.tree, ...c.parents]; }
   if (obj.type === 'tree') return treeEntries(obj).filter(e => e.mode !== '160000').map(e => e.oid);
   if (obj.type === 'tag') return [obj.data.toString().match(/^object ([0-9a-f]{40})/)?.[1]].filter(Boolean) as string[];
   return [];
+}
+export function completeGraph(objects: Map<string, GitObject>, tip: string): boolean {
+  const active = new Set<string>(), visited = new Set<string>(), stack: [string, boolean][] = [[tip, false]];
+  while (stack.length) {
+    const [id, finish] = stack.pop()!;
+    const obj = objects.get(id);
+    if (!obj) return false;
+    if (obj.complete) continue;
+    if (finish) { active.delete(id); visited.add(id); obj.complete = true; continue; }
+    if (active.has(id)) return false;
+    if (visited.has(id)) continue;
+    if (obj.type === 'commit' && !/^[0-9a-f]{40}$/.test(commitInfo(obj).tree)) return false;
+    const children = obj.children ??= links(obj);
+    if (obj.type === 'tag' && children.length !== 1) return false;
+    active.add(id); stack.push([id, true]);
+    for (const child of children) stack.push([child, false]);
+  }
+  return true;
 }
 export function ancestor(objects: Map<string, GitObject>, old: string, tip: string): boolean {
   const stack = [tip], seen = new Set<string>();
@@ -258,10 +288,13 @@ export function gitRequest(repo: any, method: string, service: string, version2:
   if (service === 'git-receive-pack') {
     const { lines, offset } = packets(body);
     const staged = repo.objects, report = ['unpack ok\n'];
+    const received: GitObject[] = [];
     try {
-      if (body.length > offset) for (const obj of readPack(body.subarray(offset), repo.objects)) staged.set(obj.oid, obj);
+      if (body.length > offset) received.push(...readPack(body.subarray(offset), repo.objects));
+      for (const obj of received) if (!staged.has(obj.oid)) staged.set(obj.oid, obj);
     } catch (e: any) {
-      return sideband(Buffer.concat([pkt(`unpack ${e.message}\n`), FLUSH]));
+      const status = Buffer.concat([pkt(`unpack ${e.message}\n`), FLUSH]);
+      return lines[0]?.includes('side-band-64k') ? sideband(status) : status;
     }
     for (const line of lines) {
       const [old, next, ref] = line.split('\0')[0].split(' ');
@@ -270,6 +303,8 @@ export function gitRequest(repo: any, method: string, service: string, version2:
       if (!/^refs\/(heads|tags)\/[^\s\0]+$/.test(ref ?? '') || !/^[0-9a-f]{40}$/.test(next ?? '')) reason = 'invalid ref';
       else if (current !== old) reason = 'stale ref';
       else if (next !== ZERO && !staged.has(next)) reason = 'missing object';
+      else if (next !== ZERO && !completeGraph(staged, next)) reason = 'incomplete object graph';
+      else if (next !== ZERO && ref.startsWith('refs/heads/') && staged.get(next).type !== 'commit') reason = 'branch must point to commit';
       else if (next !== ZERO && old !== ZERO && !ancestor(staged, old, next)) reason = 'non-fast-forward';
       if (reason) report.push(`ng ${ref} ${reason}\n`);
       else {
@@ -283,6 +318,8 @@ export function gitRequest(repo: any, method: string, service: string, version2:
   }
   const lines = allPackets(body);
   if (lines.includes('command=ls-refs')) {
+    const cacheKey = 'ls-refs:' + lines.join('\n');
+    if (repo.fetchCache.has(cacheKey)) return repo.fetchCache.get(cacheKey);
     const prefixes = lines.filter(s => s.startsWith('ref-prefix ')).map(s => s.slice(11));
     const all = head ? [['HEAD', head], ...refs] : refs;
     const out = all.filter(([name]) => !prefixes.length || prefixes.some(p => name.startsWith(p))).map(([name, id]) => {
@@ -291,7 +328,9 @@ export function gitRequest(repo: any, method: string, service: string, version2:
       if (lines.includes('peel') && peeled !== id) attributes += ` peeled:${peeled}`;
       return pkt(`${id} ${name}${attributes}\n`);
     });
-    return Buffer.concat([...out, FLUSH]);
+    const result = Buffer.concat([...out, FLUSH]);
+    if (repo.fetchCache.size >= 16) repo.fetchCache.delete(repo.fetchCache.keys().next().value);
+    repo.fetchCache.set(cacheKey, result); return result;
   }
   if (version2) return fetchPack(repo, lines);
   const v2 = fetchPack(repo, lines);
