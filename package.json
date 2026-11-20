@@ -1,0 +1,10 @@
+{
+  "name": "mimi-forge",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "A standalone git forge with GitHub REST, GraphQL and MCP interfaces.",
+  "engines": { "node": ">=22.18.0" },
+  "scripts": { "start": "node main.ts", "test": "node --test test/*.test.ts" },
+  "license": "MIT"
+}
