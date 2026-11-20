@@ -28,9 +28,18 @@ const server = createServer(async (req, res) => {
     const url = new URL(rawPath, store.origin || 'http://localhost');
     // Decode each URL component without letting an encoded slash change the API route.
     const path = url.pathname;
-    const chunks: Buffer[] = []; let size = 0;
-    for await (const chunk of req) { size += chunk.length; if (size > 64 * 1024 * 1024) throw new ApiError(413, 'Request too large'); chunks.push(chunk); }
-    const raw = Buffer.concat(chunks);
+    // Event handlers avoid creating an async-iterator task for every body chunk.
+    const raw: Buffer = method === 'GET' || method === 'HEAD' ? Buffer.alloc(0) : await new Promise((resolve, reject) => {
+      const chunks: Buffer[] = []; let size = 0;
+      req.on('data', (chunk: Buffer) => {
+        size += chunk.length;
+        if (size > 64 * 1024 * 1024) { reject(new ApiError(413, 'Request too large')); req.resume(); return; }
+        chunks.push(chunk);
+      });
+      req.once('end', () => resolve(chunks.length === 1 ? chunks[0] : Buffer.concat(chunks, size)));
+      req.once('error', reject);
+      req.once('aborted', () => reject(new ApiError(400, 'Request aborted')));
+    });
     const git = /^\/([^/]+)\/([^/]+)\.git\/(info\/refs|git-upload-pack|git-receive-pack)$/.exec(path);
     if (git) {
       const repo = store.get(decodeURIComponent(git[1]), decodeURIComponent(git[2])), service = git[3] === 'info/refs' ? url.searchParams.get('service') : git[3];

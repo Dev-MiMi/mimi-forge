@@ -15,6 +15,7 @@ export function pkt(data: string | Buffer): Buffer {
 }
 export const FLUSH = Buffer.from('0000');
 export const DELIM = Buffer.from('0001');
+const V2_ADVERTISEMENT = Buffer.concat(['version 2\n', 'agent=mimi-forge/1.0\n', 'ls-refs=unborn\n', 'fetch=shallow\n', 'object-format=sha1\n'].map(pkt).concat([FLUSH]));
 export function packets(body: Buffer): { lines: string[]; offset: number } {
   const lines: string[] = [];
   let offset = 0;
@@ -242,14 +243,17 @@ export function fetchPack(repo: any, lines: string[]): Buffer {
 }
 
 export function gitRequest(repo: any, method: string, service: string, version2: boolean, body: Buffer): Buffer {
+  if (method === 'GET' && service === 'git-upload-pack' && version2) return V2_ADVERTISEMENT;
+  const advertiseKey = `advertise:${service}:${version2}`;
+  if (method === 'GET' && repo.fetchCache.has(advertiseKey)) return repo.fetchCache.get(advertiseKey);
   const refs = [...repo.refs.entries()] as [string, string][];
   const head = repo.refs.get(`refs/heads/${repo.default_branch}`);
   if (method === 'GET') {
-    if (service === 'git-upload-pack' && version2) return Buffer.concat(['version 2\n', 'agent=mimi-forge/1.0\n', 'ls-refs=unborn\n', 'fetch=shallow\n', 'object-format=sha1\n'].map(pkt).concat([FLUSH]));
     const caps = service === 'git-receive-pack' ? 'report-status side-band-64k delete-refs ofs-delta' : `multi_ack_detailed side-band-64k shallow ofs-delta symref=HEAD:refs/heads/${repo.default_branch}`;
     const advertised = head ? [['HEAD', head], ...refs] : refs;
     if (!advertised.length) advertised.push(['capabilities^{}', ZERO]);
-    return Buffer.concat([pkt(`# service=${service}\n`), FLUSH, ...advertised.map(([name, id], i) => pkt(`${id} ${name}${i === 0 ? '\0' + caps : ''}\n`)), FLUSH]);
+    const data = Buffer.concat([pkt(`# service=${service}\n`), FLUSH, ...advertised.map(([name, id], i) => pkt(`${id} ${name}${i === 0 ? '\0' + caps : ''}\n`)), FLUSH]);
+    repo.fetchCache.set(advertiseKey, data); return data;
   }
   if (service === 'git-receive-pack') {
     const { lines, offset } = packets(body);

@@ -36,7 +36,9 @@ node /path/to/github-core-clone-01-kit/sdk/run.ts \
   --url http://127.0.0.1:PORT --token your-token --perf --json
 ```
 
-The initial complete local conformance run passed all 120 checks. Performance depends on the machine running both the client and server; the competition measures it again in its own sandbox.
+The full local conformance suite passes all 120 checks. Two fresh lifecycle trials also pass 120/120 and produce byte-identical state exports. Seven regression tests cover binary and delta packs, stale writes, conflicting and squash merges, mixed push reports, API parity and deterministic output.
+
+The first make.fun practice submission scored **902/1000**: feature 600, MCP 200, performance 102. Practice scores are provisional. Local Termux performance differs substantially from the production sandbox.
 
 The store is ephemeral and resets when the process exits. This implements the bounty's documented GitHub API subset; it does not implement all of GitHub's APIs, persistent hosting, multiple users, or a complete GraphQL specification.
 
