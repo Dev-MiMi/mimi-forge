@@ -29,7 +29,7 @@ export class Store {
   get(owner: string, name: string) {
     this.bindOwner(owner, name);
     const repo = this.repos.get(name.toLowerCase());
-    if (!repo || owner.toLowerCase() !== this.user().login.toLowerCase()) throw new ApiError(404, 'Not Found');
+    if (!repo || owner.toLowerCase() !== (this.login || 'forge-user').toLowerCase()) throw new ApiError(404, 'Not Found');
     return repo;
   }
   addNode(type: string, value: any) {

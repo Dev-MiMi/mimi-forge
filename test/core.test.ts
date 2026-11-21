@@ -144,3 +144,20 @@ test('GraphQL preserves hashes in strings, handles directives, and rejects cycli
   const missing = graphql(store, { query: '{ viewer { ...Missing } }' });
   assert.match(missing.errors[0].message, /Unknown fragment/);
 });
+
+test('issue read caches invalidate on updates and failed patches preserve stored content', () => {
+  const { store, repo } = fixture();
+  const issue = store.createIssue(repo, { title: 'Original', body: 'Before' });
+  const original = store.issueJson(issue);
+  issue._buffer = Buffer.from(JSON.stringify(original));
+  assert.throws(() => store.patchIssue(repo, issue, { title: 'Wrong', state: 'invalid' }), /Invalid state/);
+  assert.equal(issue.title, 'Original');
+  store.patchIssue(repo, issue, { title: 'Updated', body: 'After', state: 'closed' });
+  assert.equal(issue._buffer, undefined);
+  assert.equal(store.issueJson(issue).title, 'Updated');
+  assert.equal(store.issueJson(issue).state, 'closed');
+  const comment = store.comment(repo, issue, 'One comment');
+  assert.equal(store.issueJson(issue).comments, 1);
+  rest(store, 'DELETE', '/repos/mimi/example/issues/comments/' + comment.id, {}, {});
+  assert.equal(store.issueJson(issue).comments, 0);
+});

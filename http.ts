@@ -9,13 +9,14 @@ const MAX_BODY = 64 * 1024 * 1024;
 const MAX_HEADERS = 32 * 1024;
 const reasons: Record<number, string> = { 200: 'OK', 201: 'Created', 202: 'Accepted', 204: 'No Content', 400: 'Bad Request', 401: 'Unauthorized', 404: 'Not Found', 405: 'Method Not Allowed', 409: 'Conflict', 413: 'Content Too Large', 422: 'Unprocessable Entity', 431: 'Request Header Fields Too Large', 500: 'Internal Server Error' };
 const JSON_TYPE = 'application/json; charset=utf-8';
-const wireCache = new WeakMap<Buffer, { key: string; wire: Buffer }>();
+const EMPTY_HEADERS: Record<string, string> = Object.freeze({});
+const wireCache = new WeakMap<Buffer, { status: number; close: boolean; head: boolean; headers: Record<string, string>; wire: Buffer }>();
 function wire(response: Response, close: boolean, head: boolean): Buffer {
-  const { status, headers = {} } = response;
+  const { status, headers = EMPTY_HEADERS } = response;
   const body = status === 204 ? EMPTY : Buffer.isBuffer(response.data) ? response.data : Buffer.from(JSON.stringify(response.data));
-  const key = `${status}:${close}:${head}:${JSON.stringify(headers)}`;
-  const cached = wireCache.get(body);
-  if (cached?.key === key) return cached.wire;
+  const cacheable = Object.isFrozen(headers);
+  const cached = cacheable ? wireCache.get(body) : undefined;
+  if (cached?.status === status && cached.close === close && cached.head === head && cached.headers === headers) return cached.wire;
   let header = `HTTP/1.1 ${status} ${reasons[status] ?? 'Response'}\r\nContent-Type: ${headers['Content-Type'] ?? JSON_TYPE}\r\nX-GitHub-Request-Id: MIMI-FORGE\r\nContent-Length: ${body.length}\r\n`;
   for (const [name, value] of Object.entries(headers)) {
     if (name.toLowerCase() === 'content-type') continue;
@@ -24,7 +25,7 @@ function wire(response: Response, close: boolean, head: boolean): Buffer {
   }
   header += `Connection: ${close ? 'close' : 'keep-alive'}\r\n\r\n`;
   const result = Buffer.concat([Buffer.from(header), head ? EMPTY : body]);
-  if (Buffer.isBuffer(response.data)) wireCache.set(body, { key, wire: result });
+  if (cacheable && Buffer.isBuffer(response.data)) wireCache.set(body, { status, close, head, headers, wire: result });
   return result;
 }
 
@@ -64,7 +65,6 @@ export function serve(handler: Handler, driver = 'native') {
     socket.on('close', clearDeadline);
     socket.on('data', bytes => {
       if (closing) return;
-      if (!deadline) deadline = setTimeout(() => fail(400, 'Request timeout'), 15000);
       buffer = buffer.length ? Buffer.concat([buffer, bytes]) : bytes;
       try {
         for (;;) {
@@ -144,8 +144,8 @@ export function serve(handler: Handler, driver = 'native') {
           if (request.close) { closing = true; socket.end(output); break; }
           if (!socket.write(output)) { socket.pause(); socket.once('drain', () => socket.resume()); }
           if (!buffer.length) break;
-          deadline = setTimeout(() => fail(400, 'Request timeout'), 15000);
         }
+        if (!closing && !deadline && (pending || buffer.length)) deadline = setTimeout(() => fail(400, 'Request timeout'), 15000);
       } catch (e: any) { if (!closing) fail(400, e.message || 'Bad Request'); }
     });
   });
